@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>grid editor</title>
+    <link rel="icon" type="image/x-icon" href="static/logo.png">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        th, td {
+            border-bottom: solid;
+        }
+        .container {
+            margin: 0 auto;
+            background-color: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        .layer-controls, .grid-controls {
+            background-color: #f8f8f8;
+            padding: 5px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+        .canvas-container {
+            position: relative;
+            margin: 5px auto;
+            border: 2px solid #333;
+            background-color: white;
+        }
+        #drawingCanvas {
+            cursor: crosshair;
+            display: block;
+        }
+        .layers-panel {
+            margin-top: 10px;
+            background-color: #f8f8f8;
+            padding: 5px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+        .layer-item {
+            display: flex;
+            align-items: center;
+            padding: 5px;
+            margin: 5px 0;
+            background-color: white;
+            border-radius: 3px;
+            border: 1px solid #eee;
+        }
+        .layer-item.active {
+            background-color: #e6f7ff;
+            border-color: #1890ff;
+        }
+        .color-display {
+            width: 20px;
+            height: 20px;
+            border-radius: 25%;
+            margin-right: 10px;
+            border: 1px solid #ccc;
+            cursor: pointer;
+        }
+        .layer-name {
+            flex-grow: 1;
+        }
+        .layer-visibility {
+            margin-right: 10px;
+        }
+        .selected {
+            color: blue;
+            border: solid;
+        }
+        button {
+            background-color: lightgreen;
+            color: #333;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-right: 2px;
+            margin-bottom: 2px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: lightseagreen;
+        }
+        button.annote {
+            border: dashed;
+            font-size: small;
+            padding: 5px;
+        }
+        button.remove-layer {
+            border: dashed;
+            padding: 5px;
+            font-size: small;
+            background-color: lightgoldenrodyellow;
+            color: #333;
+        }
+        button.remove-layer:hover {
+            color: salmon;
+        }
+        input, select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .grid-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        .column {
+            float: left;
+            width: 50%;
+        }
+
+        /* Clear floats after the columns */
+        .row:after {
+            content: "";
+            display: table;
+            clear: both;
+        }
+        .clickable:hover {
+            cursor: pointer;
+            border: solid;
+            color: blueviolet;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="grid-controls">
+            <strong>2D Grid Editor | </strong>
+            <label for="gridRows" id="gridControl">Shape: 
+                <input type="number" id="gridRows" min="2" max="50" value="10" style="width: 50px;"> x 
+                <input type="number" id="gridCols" min="2" max="50" value="10" style="width: 50px;">
+                <button id="applyGridBtn">Set grid dimension</button>
+            </label>
+            File name:<input type="file" style="width: 80px;" id="ipf" accept=".json" oninput="uploadFile('ipf', 'fname')"> 
+            <input type="text" id="fname">.json <button id="load">Load</button> <button id="save">Save/Overwrite</button>
+            <button id="delete" class="remove-layer">Delete</button> 
+            <i id="msgbox"></i>
+        </div>
+    <div class="row">
+        <div class="column">
+            <div class="canvas-container" style="width: 600px; height: 600px;">
+                <canvas id="drawingCanvas" width="600" height="600"></canvas>
+                <canvas id="gridOverlay" class="grid-overlay" width="600" height="600"></canvas>
+            </div>
+        </div><div class="column">
+            <div class="layer-controls">
+                <label for="newLayerName">New Layer: </label>
+                <input type="text" id="newLayerName" placeholder="Layer name">
+                <input type="color" id="newLayerColor" value="#ff0000">
+                <button id="addLayerBtn">Add Layer</button>
+            </div>
+            <div class="layers-panel">
+                <h4>Assign objects by layer:
+                    <button class="remove-layer" id="clearLayer">Clear layer</button>
+                    <button class="remove-layer" id="clear">Clear all</button>
+                </h4>
+            
+                <div id="layersList"></div>
+            </div> <br>
+            <table class="layer-controls">
+                <tr><th>Action: </th>
+                    <td>Pen <input type="radio" name="penEraserBtn" value="Pen" checked="true"></td>
+                    <td>Eraser <input type="radio" name="penEraserBtn" value="Eraser"></td>
+                </tr><tr><th>Brush mode: </th>
+                    <td>Single click <input type="radio" name="singleRangeBtn" value="Single" checked="true"></td>
+                    <td>Rectangular <input type="radio" name="singleRangeBtn" value="Rectangular"></td>
+                </tr>
+            </table>
+        </div>
+    </div>
+    </div>
+
+    <script>
+        // App state
+        const state = {
+            canvas: {
+                width: 600,
+                height: 600
+            },
+            grid: {
+                rows: 10,
+                cols: 10
+            },
+            layers: [
+                { name: '[INVALID]', color: '#000'},
+                { name: '[Target] Lights', color: '#00FF00'},
+                { name: 'Air supply points', color: '#FF0000'},
+                { name: 'Air return points', color: '#FFFF00'},
+                { name: 'Smoke detectors', color: '#0000FF'},
+                { name: '_6', color: '#800000'},
+                { name: '_7', color: '#008000'},
+                { name: '_8', color: '#000080'},
+                { name: '_9', color: '#FF00FF'},
+                ],
+            activeLayerIndex: 0,
+            lastCell: null
+        };
+        state.layers.forEach((layer) => {
+            layer.visible = true; 
+            layer.data = {}; 
+        })
+
+        // DOM elements
+        const clearBtn = document.getElementById("clear");
+        const clearLayerBtn = document.getElementById("clearLayer");
+        const fnameBox = document.getElementById("fname");
+        const loadBtn = document.getElementById("load");
+        const delBtn = document.getElementById("delete");
+        const saveBtn = document.getElementById("save");
+        const msgbox = document.getElementById("msgbox");
+
+        const canvas = document.getElementById('drawingCanvas');
+        const ctx = canvas.getContext('2d');
+        const gridOverlay = document.getElementById('gridOverlay');
+        const gridCtx = gridOverlay.getContext('2d');
+        const gridRowsInput = document.getElementById('gridRows');
+        const gridColsInput = document.getElementById('gridCols');
+        const applyGridBtn = document.getElementById('applyGridBtn');
+        const newLayerNameInput = document.getElementById('newLayerName');
+        const newLayerColorInput = document.getElementById('newLayerColor');
+        const addLayerBtn = document.getElementById('addLayerBtn');
+        const layersList = document.getElementById('layersList');
+
+        // Initialize the app
+        function init() {
+            drawGrid();
+            renderLayers();
+            setupEventListeners();
+            redrawCanvas();
+        }
+
+        function pushMessage(success, content) {
+            if (success) {
+                msgbox.style.color = "lightseagreen";
+            } else {
+                msgbox.style.color = "salmon";
+            }
+            msgbox.innerHTML = content;
+        }
+
+        function uploadFile(id, fnameBox) {
+            const segs = document.getElementById(id).value.split("\\");
+            document.getElementById(fnameBox).value = segs[segs.length-1].split(".")[0];
+        }
+
+        function isPen() {
+            const elem = document.getElementsByName("penEraserBtn")[0];
+            return elem.value == "Pen" && elem.checked;
+        }
+
+        function isSingleClick() {
+            const elem = document.getElementsByName("singleRangeBtn")[0];
+            return elem.value == "Single" && elem.checked;
+        }
+
+        // Draw grid on overlay
+        function drawGrid() {
+            gridCtx.clearRect(0, 0, state.canvas.width, state.canvas.height);
+            gridCtx.strokeStyle = '#cccccc';
+            gridCtx.lineWidth = 1;
+            
+            const cellWidth = state.canvas.width / state.grid.cols;
+            const cellHeight = state.canvas.height / state.grid.rows;
+            
+            // Draw vertical lines
+            for (let x = 0; x <= state.canvas.width; x += cellWidth) {
+                gridCtx.beginPath();
+                gridCtx.moveTo(x, 0);
+                gridCtx.lineTo(x, state.canvas.height);
+                gridCtx.stroke();
+            }
+            
+            // Draw horizontal lines
+            for (let y = 0; y <= state.canvas.height; y += cellHeight) {
+                gridCtx.beginPath();
+                gridCtx.moveTo(0, y);
+                gridCtx.lineTo(state.canvas.width, y);
+                gridCtx.stroke();
+            }
+        }
+
+        // Redraw the entire canvas based on all layers
+        function redrawCanvas() {            
+            // Draw all visible layers
+            ctx.clearRect(0, 0, state.canvas.width, state.canvas.height);
+            state.layers.forEach(layer => {
+                if (!layer.visible) return;
+                
+                // Draw grid cells
+                const cellWidth = state.canvas.width / state.grid.cols;
+                const cellHeight = state.canvas.height / state.grid.rows;
+                
+                ctx.fillStyle = layer.color;
+                
+                for (const key in layer.data) {
+                    const [row, col] = key.split(',').map(Number);
+                    ctx.fillRect(
+                        col * cellWidth, 
+                        row * cellHeight, 
+                        cellWidth, 
+                        cellHeight
+                    );
+                }
+            });
+        }
+
+        // Render the layers list in the UI
+        function renderLayers() {
+            layersList.innerHTML = '';
+            state.layers.forEach((layer, index) => {
+                const layerItem = document.createElement('div');
+                layerItem.id = 'goal_'+index;
+                layerItem.className = `layer-item ${index === state.activeLayerIndex ? 'active' : ''}`;
+                
+                const colorDisplay = document.createElement('div');
+                colorDisplay.className = 'color-display';
+                colorDisplay.style.backgroundColor = layer.color;
+                
+                const layerName = document.createElement('span');
+                layerName.className = 'layer-name';
+                layerName.textContent = layer.name;
+
+                const visibilityCheckbox = document.createElement('input');
+                visibilityCheckbox.type = 'checkbox';
+                visibilityCheckbox.className = 'layer-visibility';
+                visibilityCheckbox.checked = layer.visible;
+                visibilityCheckbox.addEventListener('change', () => {
+                    layer.visible = visibilityCheckbox.checked;
+                    redrawCanvas();
+                });
+                // const removeBtn = document.createElement('button');
+                // removeBtn.className = 'remove-layer';
+                // removeBtn.textContent = 'Remove';
+                // removeBtn.disabled = true;
+                // removeBtn.addEventListener('click', () => removeLayer(index));
+                
+                layerItem.appendChild(colorDisplay);
+                layerItem.appendChild(layerName);
+                layerItem.appendChild(visibilityCheckbox);
+                
+                // layerItem.appendChild(removeBtn);
+                
+                layerItem.addEventListener('click', (e) => {
+                    // if (![removeBtn, visibilityCheckbox].includes(e.target )) {
+                    //     setActiveLayer(index);
+                    // }
+                    setActiveLayer(index);
+                });
+                layersList.appendChild(layerItem);
+            });
+        }
+
+        // Set the active layer
+        function setActiveLayer(index) {
+            state.activeLayerIndex = index;
+            state.layers.forEach((layer, index) => {
+                document.getElementById("goal_"+index).className = `layer-item ${index === state.activeLayerIndex ? 'active' : ''}`;
+            })
+        }
+
+        // Add a new layer
+        function addLayer(name, color) {
+            if (!name.trim()) {
+                alert('Please enter a layer name');
+                return;
+            }
+            
+            state.layers.push({
+                name: name,
+                color: color,
+                visible: true,
+                data: {},
+            });
+            
+            state.activeLayerIndex = state.layers.length - 1;
+            renderLayers();
+        }
+
+        // // Remove a layer
+        // function removeLayer(index) {
+        //     // Don't remove if it's the last layer
+        //     if (state.layers.length <= 1) {
+        //         alert('Cannot remove the last layer');
+        //         return;
+        //     }
+            
+        //     state.layers.splice(index, 1);
+            
+        //     // Update active layer index if needed
+        //     if (state.activeLayerIndex >= state.layers.length) {
+        //         state.activeLayerIndex = state.layers.length - 1;
+        //     }
+            
+        //     renderLayers();
+        //     redrawCanvas();
+        // }
+
+        // Handle grid cell click in discrete mode
+        function handleGridCellClick(x, y) {
+            const cellWidth = state.canvas.width / state.grid.cols;
+            const cellHeight = state.canvas.height / state.grid.rows;
+            
+            const col = Math.floor(x / cellWidth);
+            const row = Math.floor(y / cellHeight);
+            
+            const activeLayer = state.layers[state.activeLayerIndex];
+            const key = `${row},${col}`;
+            if (!isSingleClick()){
+                if (!state.lastCell) {
+                    state.lastCell = {row, col};
+                } else {
+                    const rf = Math.min(row, state.lastCell.row);
+                    const rt = Math.max(row, state.lastCell.row);
+                    const cf = Math.min(col, state.lastCell.col);
+                    const ct = Math.max(col, state.lastCell.col);
+                    const pen = isPen();
+                    for (let r=rf; r <= rt; r++) {
+                        for (let c=cf; c <= ct; c++) {
+                            if (pen) {
+                                activeLayer.data[`${r},${c}`] = true;
+                            } else {
+                                delete activeLayer.data[`${r},${c}`];
+                            }
+                        }
+                    }
+                    state.lastCell = null;
+                }
+            } else {
+                if (activeLayer.data[key]) {
+                    delete activeLayer.data[key];
+                } else {
+                    activeLayer.data[key] = true;
+                }
+            }
+            
+            redrawCanvas();
+        }
+
+
+
+        function setupGrid(rows, cols) {
+            if (rows >= 2 && rows <= 50 && cols >= 2 && cols <= 50) {
+                state.grid.rows = rows;
+                state.grid.cols = cols;
+                drawGrid();
+                redrawCanvas();
+            } else {
+                alert('Grid size must be between 2 and 50');
+            }
+        }
+
+// Setup event listeners
+        function setupEventListeners() {
+            
+            // Apply grid
+            applyGridBtn.addEventListener('click', () => {
+                const rows = parseInt(gridRowsInput.value);
+                const cols = parseInt(gridColsInput.value);
+                setupGrid(rows, cols);
+            });
+
+            clearBtn.addEventListener('click', () => {
+                state.layers.forEach((layer) => {
+                    layer.data = {};
+                })
+                redrawCanvas();
+            }); clearLayerBtn.addEventListener('click', () => {
+                const activeLayer = state.layers[state.activeLayerIndex]; 
+                activeLayer.data = {};
+                redrawCanvas();
+            })
+
+            loadBtn.addEventListener('click', () => {
+                fetch("/load", {method:'POST', 
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body:JSON.stringify({fname:fnameBox.value+".json"})})
+                .then(response => response.json()).then(data => {
+                    if (!data.success) {
+                        pushMessage(false, "Not found grid "+fnameBox.value);
+                        return;
+                    }
+                    setupGrid(data.rows, data.cols);
+                    state.layers = [];
+                    data.layers.forEach((layer, i) => {
+                        const entry = {"name": layer.name, "color": layer.color, "visible":true, "data":layer.data};
+                        state.layers.push(entry);
+                    })
+                    gridRowsInput.value = data.rows;
+                    gridColsInput.value = data.cols;
+                    renderLayers();
+                    redrawCanvas();
+                    pushMessage(true, "Loading grid "+fnameBox.value);
+                })
+            })
+            saveBtn.addEventListener('click', () => {
+                const requestBody = {fname:fnameBox.value+".json", dim: [state.grid.rows, state.grid.cols]};
+                requestBody["grid"] = state.layers.map((layer, index) => {
+                    return {id: index, name: layer.name, color: layer.color, data: layer.data};
+                });
+                fetch('/save', {method: 'POST', 
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)})
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Error saving grid ${response.statusText}`);
+                    }
+                    return response.json();
+                }).then(data => {
+                    if (!data.success) {
+                        pushMessage(false, "Failed to save "+fnameBox.value);
+                    } else {
+                        pushMessage(true, "Saving grids "+fnameBox.value);
+                    }
+                });;
+            })
+            delBtn.addEventListener('click', () => {
+                fetch('/deltrn/saved_disc', {method:'PUT', 
+                headers: {
+                            'Content-Type': 'application/json'
+                        },body:JSON.stringify({fname:fnameBox.value+".json"})})
+                .then(response => response.json()).then( data => {
+                    if (data.success) {
+                        pushMessage(true, "Delete saved_disc/"+fnameBox.value);
+                    } else {
+                        pushMessage(false, "Delete file not found");
+                    }
+                })
+            })
+            
+            // Add layer
+            addLayerBtn.addEventListener('click', () => {
+                addLayer(newLayerNameInput.value, newLayerColorInput.value);
+                newLayerNameInput.value = '';
+            });
+            
+            // Canvas mouse events
+            canvas.addEventListener('mousedown', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                handleGridCellClick(x, y);
+            });
+        }
+
+        // Initialize application when document is loaded
+        document.addEventListener('DOMContentLoaded', init);
+        // Call init() to ensure app starts even if DOMContentLoaded already fired
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            init();
+        }
+    </script>
+</body>
+</html>
