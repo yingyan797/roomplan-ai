@@ -10,6 +10,20 @@ from data_util import GridFileProcessor, GridDataset, collate_variable_size
 
 # All Training Tasks
 
+@task(name="Fetch Dataset")
+def fetch_training_dataset(random_data=False):
+    grids, targets = [], []
+    if random_data:
+        pass
+        # Generate data
+        # grids, targets = generate_data(n_samples, min_size, max_size)
+    else:
+        all_data = (GridFileProcessor("dataset/"+fname).create_input_output() for fname in os.listdir("dataset/")  if fname.startswith("training_"))
+        for _grids, _targets in all_data:
+            grids.extend(_grids)
+            targets.extend(_targets)
+    return grids, targets
+
 @task(name="Prepare DataLoaders")
 def prepare_dataloaders(grids: List[np.ndarray], targets: List[np.ndarray], 
                        batch_size=8) -> Dict[str, DataLoader]:
@@ -110,6 +124,7 @@ def train_route_a_attention(model: nn.Module, dataloaders: Dict[str, DataLoader]
     for param in model.parameters():
         param.requires_grad = True
     
+    torch.save(model.state_dict(), 'saved_models/model_a.pth')
     return model
 
 
@@ -146,6 +161,7 @@ def train_route_b_e2e(dataloaders: Dict[str, DataLoader],
         scheduler.step(avg_loss)
         logger.info(f"Route B E2E - Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
     
+    torch.save(model.state_dict(), 'saved_models/model_b.pth')
     return model
 
 
@@ -206,6 +222,7 @@ def train_fusion_model(preds_a: torch.Tensor, preds_b: torch.Tensor,
         avg_loss = train_loss / n_batches
         logger.info(f"Fusion - Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
     
+    torch.save(fusion_model.state_dict(), 'saved_models/fusion_model.pth')
     return fusion_model
 
 @task(name="Evaluate Models")
@@ -248,23 +265,14 @@ def evaluate_models(model_a: nn.Module, model_b: nn.Module,
 # MAIN PREFECT TRAINING FLOW 
 
 @flow(name="2D Grid Segmentation Pipeline")
-def grid_segmentation_pipeline(device='cuda', random_data=False, n_samples=1000, min_size=32, max_size=128):
+def grid_segmentation_pipeline(device='cuda', random_data=False):
     """
     Main Prefect flow orchestrating the entire ML pipeline
     """
     logger.info("Starting 2D Grid Segmentation Pipeline")
-    grids, targets = [], []
-    if random_data:
-        pass
-        # Generate data
-        # grids, targets = generate_data(n_samples, min_size, max_size)
-    else:
-        all_data = (GridFileProcessor("dataset/"+fname).create_input_output() for fname in os.listdir("dataset/"))
-        for _grids, _targets in all_data:
-            grids.extend(_grids)
-            targets.extend(_targets)
-
-    dataloaders = prepare_dataloaders.submit(grids, targets)
+    
+    grids, targets = fetch_training_dataset.submit(random_data)
+    dataloaders = prepare_dataloaders.submit(grids, targets, wait_for=[grids, targets])
     
     # Route A: Pretrain then fine-tune attention
     logger.info("Starting Route A (Pretrain + Attention)")
@@ -312,8 +320,6 @@ def grid_segmentation_pipeline(device='cuda', random_data=False, n_samples=1000,
     }
 
 
-
-
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Using device: {device}")
@@ -321,11 +327,3 @@ if __name__ == "__main__":
     # Run the pipeline
     models = grid_segmentation_pipeline(device=device,)
     
-    # Example inference with different sizes
-    for size in [40, 64, 96]:
-        # Create example one-hot encoded grid [H, W, 6]
-        test_grid_cat = np.random.randint(0, 6, (size, size))
-        test_grid_onehot = np.eye(6, dtype=np.float32)[test_grid_cat]
-        
-        prediction = predict(test_grid_onehot, models, device=device)
-        logger.info(f"Prediction for {size}x{size} grid: {prediction.shape}, positions: {prediction.sum()}")

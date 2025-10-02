@@ -5,8 +5,18 @@ import numpy as np
 from prefect import flow, task
 from typing import Tuple, Dict, List
 from models import logger
+from data_util import GridFileProcessor
+from models import logger, UNetWithAttention, FusionModel
 
 # ALL INFERENCE TASKS
+
+def fetch_inference_dataset():
+    grids, targets = [], []
+    all_data = (GridFileProcessor("dataset/"+fname).create_input_output() for fname in os.listdir("dataset/") if fname.startswith("test_"))
+    for _grids, _targets in all_data:
+        grids.extend(_grids)
+        targets.extend(_targets)
+    return grids, targets
 
 @task(name="Prepare Batch Inference Input")
 def prepare_batch_inference_input(grids_onehot: List[np.ndarray], device='cuda') -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
@@ -98,7 +108,7 @@ def postprocess_batch_predictions(preds: torch.Tensor, original_shapes: List[Tup
 
 def predict_single_grid(grid_onehot: np.ndarray, models: dict, device='cuda', threshold=0.5) -> np.ndarray:
     """
-    Make predictions on a new grid of any size
+    Make predictions on a new grid of any size, without using prefect flow
     
     Args:
         grid_onehot: 3D numpy array [H, W, 6] with one-hot encoded categories
@@ -138,8 +148,21 @@ def predict_single_grid(grid_onehot: np.ndarray, models: dict, device='cuda', th
     
     return mask
 
+def result_validation(mask:torch.Tensor, grids_onehot: List[np.ndarray], targets: List[np.ndarray]):
+    coords = torch.nonzero(mask).numpy()
+    rows, cols = coords[:, :, 0], coords[:, :, 1]
+    # Check placing in invalid or occupied locations (clashing)
+    orig_objects = np.sum(grids_onehot[rows, cols], axis=1)
+    count_clashes = np.sum(orig_objects[:, 1:], axis=1) - orig_objects[:,2]
+    
+    # Check accuracy
+    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    target_tensor = torch.stack([torch.from_numpy(t).float() for t in targets])
+    per_sample_loss = criterion(mask, target_tensor).mean(dim=(1, 2))
+    return {"number of clashes": count_clashes, "loss values": per_sample_loss}
+
 @flow(name="Batch Grid Inference")
-def predict_batch_grids(grids_onehot: List[np.ndarray], models: dict,
+def predict_batch_grids(grids_onehot: List[np.ndarray], batch_size: int, models: dict,
                        device='cuda', threshold=0.5) -> List[np.ndarray]:
     """
     Prefect flow for making predictions on multiple grids with true batch processing
@@ -157,41 +180,66 @@ def predict_batch_grids(grids_onehot: List[np.ndarray], models: dict,
     # Prepare all grids into a single batch tensor
     batch_future = prepare_batch_inference_input.submit(grids_onehot, device)
     batch_tensor, original_shapes = batch_future.result()
+
+    output_masks = []    
+    for i in range(0, len(grids_onehot), batch_size):
+        # Generate predictions from Route A for entire batch
+        pred_a_future = generate_batch_predictions.submit(
+            models['model_a'],
+            batch_tensor[i:i+batch_size],
+            device=device,
+            wait_for=[batch_future]
+        )
+        
+        # Generate predictions from Route B for entire batch (parallel with Route A)
+        pred_b_future = generate_batch_predictions.submit(
+            models['model_b'],
+            batch_tensor[i:i+batch_size],
+            device=device,
+            wait_for=[batch_future]
+        )
+        
+        # Fuse predictions for entire batch (waits for both routes)
+        fused_future = fuse_batch_predictions.submit(
+            pred_a_future,
+            pred_b_future,
+            models['fusion_model'],
+            device=device,
+            wait_for=[pred_a_future, pred_b_future]
+        )
+        
+        # Postprocess all predictions
+        masks_future = postprocess_batch_predictions.submit(
+            fused_future,
+            original_shapes[i:i+batch_size],
+            threshold=threshold,
+            wait_for=[fused_future]
+        )
+        
+        output_masks.append((i, masks_future.result()))
+        logger.info(f"Batch inference completed for grids {i} to {min(i+batch_size-1, len(grids_onehot))}")
+
     
-    # Generate predictions from Route A for entire batch
-    pred_a_future = generate_batch_predictions.submit(
-        models['model_a'],
-        batch_tensor,
-        device=device,
-        wait_for=[batch_future]
+    output_masks.sort(key=lambda entry: entry[0])   # Arrange synchronous outputs in order
+    all_masks = torch.cat(list(batch[1] for batch in output_masks))
+    return torch.stack(all_masks)
+
+if __name__ == "__main__":
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Using device: {device}")
+    
+    model_a = UNetWithAttention().to(device)
+    model_a.load_state_dict(torch.load("saved_models/model_a.pth"))
+    model_b = UNetWithAttention().to(device)
+    model_b.load_state_dict(torch.load("saved_models/model_b.pth"))
+    fusion_model = FusionModel().to(device)
+    fusion_model.load_state_dict(torch.load("saved_models/fusion_model.pth"))
+    
+    grids, targets = fetch_inference_dataset()
+    outputs = predict_batch_grids(
+        grids, batch_size=32, 
+        models={"model_a":model_a, "model_b":model_b, "fusion_model":fusion_model},
+        device=device
     )
-    
-    # Generate predictions from Route B for entire batch (parallel with Route A)
-    pred_b_future = generate_batch_predictions.submit(
-        models['model_b'],
-        batch_tensor,
-        device=device,
-        wait_for=[batch_future]
-    )
-    
-    # Fuse predictions for entire batch (waits for both routes)
-    fused_future = fuse_batch_predictions.submit(
-        pred_a_future,
-        pred_b_future,
-        models['fusion_model'],
-        device=device,
-        wait_for=[pred_a_future, pred_b_future]
-    )
-    
-    # Postprocess all predictions
-    masks_future = postprocess_batch_predictions.submit(
-        fused_future,
-        original_shapes,
-        threshold=threshold,
-        wait_for=[fused_future]
-    )
-    
-    masks = masks_future.result()
-    
-    logger.info(f"Batch inference completed for {len(masks)} grids")
-    return masks
+
+    print(result_validation(outputs, grids, targets))

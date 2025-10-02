@@ -1,6 +1,6 @@
 * ML Training Pipeline using Prefect
 
-START: Generate data/Fetch data from files
+Generate data/Fetch data from files
       ↓
 Prepare dataloaders
       ↓
@@ -8,7 +8,7 @@ Prepare dataloaders
       ↓                    ↓
 <Route A>               <Route B>
 Pretrain CNN               ↓
-      ↓                End-to-end
+      ↓              End-to-end Training
 Train attention            ↓
       ↓                    ↓
 Produce preds_a      Produce preds_b
