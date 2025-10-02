@@ -78,7 +78,7 @@ def fuse_batch_predictions(preds_a: torch.Tensor, preds_b: torch.Tensor,
 
 @task(name="Postprocess Batch Predictions")
 def postprocess_batch_predictions(preds: torch.Tensor, original_shapes: List[Tuple[int, int]],
-                                 threshold: float = 0.5) -> List[np.ndarray]:
+                                 threshold: float = 0.5) -> torch.Tensor:
     """
     Convert batch predictions to binary masks and crop to original sizes
     
@@ -94,7 +94,7 @@ def postprocess_batch_predictions(preds: torch.Tensor, original_shapes: List[Tup
     
     # Convert to binary
     batch_masks = torch.sigmoid(preds) > threshold
-    batch_masks = batch_masks.squeeze(1).numpy()  # [B, H, W]
+    batch_masks = batch_masks.squeeze(1)  # [B, H, W]
     
     # Crop each mask to original size
     for i, (orig_h, orig_w) in enumerate(original_shapes):
@@ -148,22 +148,24 @@ def predict_single_grid(grid_onehot: np.ndarray, models: dict, device='cuda', th
     
     return mask
 
-def result_validation(mask:torch.Tensor, grids_onehot: List[np.ndarray], targets: List[np.ndarray]):
-    coords = torch.nonzero(mask).numpy()
-    rows, cols = coords[:, :, 0], coords[:, :, 1]
-    # Check placing in invalid or occupied locations (clashing)
-    orig_objects = np.sum(grids_onehot[rows, cols], axis=1)
-    count_clashes = np.sum(orig_objects[:, 1:], axis=1) - orig_objects[:,2]
-    
-    # Check accuracy
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
-    target_tensor = torch.stack([torch.from_numpy(t).float() for t in targets])
-    per_sample_loss = criterion(mask, target_tensor).mean(dim=(1, 2))
-    return {"number of clashes": count_clashes, "loss values": per_sample_loss}
+@task(name="Validate result")
+def result_validation(masks:List[torch.Tensor], grids_onehot: List[np.ndarray], targets: List[np.ndarray]):
+    for i, mask in enumerate(masks):
+        coords = torch.nonzero(mask).numpy()
+        rows, cols = coords[:, 0], coords[:, 1]
+        # Check placing in invalid or occupied locations (clashing)
+        orig_objects = np.sum(grids_onehot[i][rows, cols], axis=0)
+        count_clashes = np.sum(orig_objects[1:]) - orig_objects[1]
+
+        # Check accuracy and recall
+        count_correct = np.sum(targets[i][rows, cols])
+        count_missing = np.count_nonzero(targets[i]) - count_correct
+
+        yield {"sample": i, "number of clashes": count_clashes, "correct": count_correct, "missing": count_missing}
 
 @flow(name="Batch Grid Inference")
-def predict_batch_grids(grids_onehot: List[np.ndarray], batch_size: int, models: dict,
-                       device='cuda', threshold=0.5) -> List[np.ndarray]:
+def predict_batch_grids(grids_onehot: List[np.ndarray], batch_size: int, models: dict, targets: List[np.ndarray],
+                       device='cuda', threshold=0.5) -> Tuple[List[torch.Tensor], List[Dict]]:
     """
     Prefect flow for making predictions on multiple grids with true batch processing
     
@@ -221,8 +223,14 @@ def predict_batch_grids(grids_onehot: List[np.ndarray], batch_size: int, models:
 
     
     output_masks.sort(key=lambda entry: entry[0])   # Arrange synchronous outputs in order
-    all_masks = torch.cat(list(batch[1] for batch in output_masks))
-    return torch.stack(all_masks)
+    all_masks = []
+    for batch in output_masks:
+        all_masks.extend(batch[1])
+
+    if targets:
+        validated = result_validation.submit(all_masks, grids_onehot, targets, wait_for=all_masks)
+        return all_masks, validated.result()
+    return all_masks, None
 
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -236,10 +244,13 @@ if __name__ == "__main__":
     fusion_model.load_state_dict(torch.load("saved_models/fusion_model.pth"))
     
     grids, targets = fetch_inference_dataset()
-    outputs = predict_batch_grids(
-        grids, batch_size=32, 
+    masks, validated = predict_batch_grids(
+        grids, batch_size=32,
         models={"model_a":model_a, "model_b":model_b, "fusion_model":fusion_model},
+        targets=targets,
         device=device
     )
 
-    print(result_validation(outputs, grids, targets))
+    # Validate if test set targets is given
+    for val in validated:
+        print(val)

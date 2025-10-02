@@ -25,11 +25,11 @@ def fetch_training_dataset(random_data=False):
     return grids, targets
 
 @task(name="Prepare DataLoaders")
-def prepare_dataloaders(grids: List[np.ndarray], targets: List[np.ndarray], 
-                       batch_size=8) -> Dict[str, DataLoader]:
+def prepare_dataloaders(dataset: Tuple[List[np.ndarray],List[np.ndarray]], batch_size=8) -> Dict[str, DataLoader]:
     """Split data and create dataloaders"""
     logger.info("Preparing train/val dataloaders")
     
+    grids, targets = dataset
     n = len(grids)
     split = int(0.8 * n)
     
@@ -271,13 +271,13 @@ def grid_segmentation_pipeline(device='cuda', random_data=False):
     """
     logger.info("Starting 2D Grid Segmentation Pipeline")
     
-    grids, targets = fetch_training_dataset.submit(random_data)
-    dataloaders = prepare_dataloaders.submit(grids, targets, wait_for=[grids, targets])
+    dataset = fetch_training_dataset.submit(random_data) 
+    dataloaders = prepare_dataloaders.submit(dataset.result(), wait_for=[dataset])
     
     # Route A: Pretrain then fine-tune attention
     logger.info("Starting Route A (Pretrain + Attention)")
     model_a_pretrain = train_route_a_pretrain.submit(dataloaders, epochs=20, device=device, wait_for=[dataloaders])
-    model_a = train_route_a_attention.submit(model_a, dataloaders, epochs=15, device=device, wait_for=[model_a_pretrain])
+    model_a = train_route_a_attention.submit(model_a_pretrain, dataloaders, epochs=15, device=device, wait_for=[model_a_pretrain])
     
     # Route B: End-to-end training (runs in parallel conceptually)
     logger.info("Starting Route B (End-to-End)")
